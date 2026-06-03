@@ -1,0 +1,37 @@
+.DS_Store
+Thumbs.db
+
+# IDE and local editor state
+.idea/
+.vscode/
+.claude-code-gui/
+
+# Python cache and build artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Logs and runtime outputs
+*.log
+wandb/
+tb_logger/
+experiments/*/
+!experiments/pretrained_models/
+!experiments/pretrained_models/README.md
+results/
+
+# Datasets and model weights should be stored outside Git or via Git LFS.
+datasets/*
+!datasets/README.md
+!datasets/example/
+*.pth
+*.pt
+*.ckpt
+*.safetensors
