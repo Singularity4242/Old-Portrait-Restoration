@@ -4,7 +4,7 @@ from basicsr.utils import get_root_logger
 from basicsr.utils.registry import LOSS_REGISTRY
 from .losses import (CharbonnierLoss, GANLoss, L1Loss, MSELoss, WeightedTVLoss, g_path_regularize,
                      gradient_penalty_loss, r1_penalty)
-from .face_losses import ROIWeightedL1Loss, IdentityLoss
+#from .face_losses import ROIWeightedL1Loss, IdentityLoss
 
 __all__ = [
     'L1Loss', 'MSELoss', 'CharbonnierLoss', 'WeightedTVLoss', 'GANLoss', 'gradient_penalty_loss',
