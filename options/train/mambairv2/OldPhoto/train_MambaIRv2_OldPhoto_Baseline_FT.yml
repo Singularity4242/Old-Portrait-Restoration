@@ -1,0 +1,116 @@
+name: MambaIRv2_OldPhoto_Baseline_FT_Resume30000
+model_type: MambaIRv2Model
+scale: 1
+num_gpu: 1
+manual_seed: 0
+
+# dataset and data loader settings
+datasets:
+  train:
+    name: OldPhoto_Baseline_FT_Train
+    type: PairedImageDataset
+    dataroot_gt: /root/autodl-tmp/MambaIR/datasets/FFHQ_pair/train/HQ
+    dataroot_lq: /root/autodl-tmp/MambaIR/datasets/FFHQ_pair/train/LQ
+    filename_tmpl: '{}'
+    io_backend:
+      type: disk
+
+    gt_size: 128
+    use_hflip: true
+    use_rot: false
+
+    # data loader
+    use_shuffle: true
+    num_worker_per_gpu: 4
+    batch_size_per_gpu: 1
+    dataset_enlarge_ratio: 1
+    prefetch_mode: ~
+
+  val:
+    name: FFHQ_OldPhoto_Val
+    type: PairedImageDataset
+    dataroot_gt: /root/autodl-tmp/MambaIR/datasets/FFHQ_pair/val/HQ
+    dataroot_lq: /root/autodl-tmp/MambaIR/datasets/FFHQ_pair/val/LQ
+    filename_tmpl: '{}'
+    io_backend:
+      type: disk
+
+# network structures
+network_g:
+  type: MambaIRv2
+  upscale: 1
+  in_chans: 3
+  img_size: 128
+  img_range: 1.
+  embed_dim: 174
+  d_state: 16
+  depths: [6, 6, 6, 6, 6, 6]
+  num_heads: [6, 6, 6, 6, 6, 6]
+  window_size: 16
+  inner_rank: 64
+  num_tokens: 128
+  convffn_kernel_size: 5
+  mlp_ratio: 2.
+  upsampler: ''
+  resi_connection: '1conv'
+
+# path
+path:
+  pretrain_network_g: /root/autodl-tmp/MambaIR/experiments/MambaIRv2_OldPhoto_Baseline_FT/models/net_g_30000.pth
+  #pretrain_network_g: /root/autodl-tmp/MambaIR/pretrained/mambairv2_ColorDN_15.pth
+  strict_load_g: true
+  resume_state: ~
+
+# training settings
+train:
+  optim_g:
+    type: Adam
+    lr: !!float 5e-5
+    weight_decay: 0
+    betas: [0.9, 0.99]
+
+  scheduler:
+    type: MultiStepLR
+    milestones: [75000, 120000, 135000, 142500]
+    gamma: 0.5
+
+  total_iter: 120000
+  warmup_iter: -1
+
+  # losses
+  pixel_opt:
+    type: CharbonnierLoss
+    loss_weight: 1.0
+    reduction: mean
+    eps: !!float 1e-3
+
+# validation settings
+val:
+  val_freq: !!float 1e4
+  save_img: false
+
+  metrics:
+    psnr:
+      type: calculate_psnr
+      crop_border: 0
+      test_y_channel: false
+    ssim:
+      type: calculate_ssim
+      crop_border: 0
+      test_y_channel: false
+
+# logging settings
+logger:
+  print_freq: 200
+  save_checkpoint_freq: !!float 1e4
+  use_tb_logger: true
+  wandb:
+    # 【NICOLE 2026】Enable W&B monitoring for old-photo restoration runs.
+    entity: singularity1371301-the-hong-kong-polytechnic-university
+    project: MambaIR
+    resume_id: ~
+
+# dist training settings
+dist_params:
+  backend: nccl
+  port: 29500

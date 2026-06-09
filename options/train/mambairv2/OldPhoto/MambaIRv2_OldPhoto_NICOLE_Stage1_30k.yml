@@ -1,0 +1,159 @@
+# 【NICOLE 2026】--最终模型
+name: MambaIRv2_OldPhoto_NICOLE_Stage1_30k
+model_type: MambaIRv2Model
+scale: 1
+num_gpu: 1
+manual_seed: 0
+
+# dataset and data loader settings
+datasets:
+  train:
+    name: OldPhoto_FaceWeighted_Sobel_Train
+    type: PairedImageDataset
+    dataroot_gt: /root/autodl-tmp/MambaIR/datasets/FFHQ_pair/train/HQ
+    dataroot_lq: /root/autodl-tmp/MambaIR/datasets/FFHQ_pair/train/LQ
+    dataroot_face_weight: /root/autodl-tmp/MambaIR/datasets/FFHQ_pair/train/face_weight
+    filename_tmpl: '{}'
+    io_backend:
+      type: disk
+
+    gt_size: 128
+    use_hflip: true
+    use_rot: false
+
+    # data loader
+    use_shuffle: true
+    num_worker_per_gpu: 4
+    batch_size_per_gpu: 1
+    dataset_enlarge_ratio: 1
+    prefetch_mode: ~
+
+  val:
+    name: FFHQ_OldPhoto_Val
+    type: PairedImageDataset
+    dataroot_gt: /root/autodl-tmp/MambaIR/datasets/FFHQ_pair/val/HQ
+    dataroot_lq: /root/autodl-tmp/MambaIR/datasets/FFHQ_pair/val/LQ
+    # 【NICOLE 2026】
+    dataroot_face_weight: /root/autodl-tmp/MambaIR/datasets/FFHQ_pair/val/face_weight
+    # 【NICOLE 2026】
+    filename_tmpl: '{}'
+    io_backend:
+      type: disk
+
+# network structures
+network_g:
+  type: MambaIRv2
+  #HEB
+  use_heb: true
+  heb_init: 0.0
+  heb_channel_wise: true
+  #HEB
+  upscale: 1
+  in_chans: 3
+  img_size: 128
+  img_range: 1.
+  embed_dim: 174
+  d_state: 16
+  depths: [6, 6, 6, 6, 6, 6]
+  num_heads: [6, 6, 6, 6, 6, 6]
+  window_size: 16
+  inner_rank: 64
+  num_tokens: 128
+  convffn_kernel_size: 5
+  mlp_ratio: 2.
+  upsampler: ''
+  resi_connection: '1conv'
+
+# path
+path:
+  pretrain_network_g: /root/autodl-tmp/MambaIR/pretrained/mambairv2_ColorDN_15.pth
+  # 因为引入新参数
+  strict_load_g: false
+  resume_state: ~
+
+# training settings
+train:
+  optim_g:
+    type: Adam
+    lr: !!float 2e-4
+    weight_decay: 0
+    betas: [0.9, 0.99]
+
+  scheduler:
+    type: MultiStepLR
+    milestones: [150000, 240000, 270000, 285000]
+    gamma: 0.5
+
+  total_iter: 30000
+  warmup_iter: -1
+
+  # losses
+  pixel_opt:
+    type: CharbonnierLoss
+    loss_weight: 1.0
+    reduction: mean
+    eps: !!float 1e-3
+
+  # 【NICOLE 2026】
+  face_region_opt:
+    type: FaceRegionWeightedCharbonnierLoss
+    loss_weight: 0.2
+    reduction: mean
+    eps: !!float 1e-3
+    weight_min: 0.0
+    weight_max: 1.0
+
+  edge_opt:
+    type: FaceRegionWeightedSobelCharbonnierLoss
+    loss_weight: 0.05
+    reduction: mean
+    eps: !!float 1e-3
+    weight_min: 0.0
+    weight_max: 1.0
+  # 【NICOLE 2026】
+
+# validation settings
+val:
+  val_freq: !!float 5e3
+  save_img: false
+
+  metrics:
+    psnr:
+      type: calculate_psnr
+      crop_border: 0
+      test_y_channel: false
+    ssim:
+      type: calculate_ssim
+      crop_border: 0
+      test_y_channel: false
+    # 【NICOLE 2026】
+    face_psnr:
+      type: calculate_face_psnr
+      better: higher
+      crop_border: 0
+      test_y_channel: false
+      mask_threshold: 1
+    face_ssim:
+      type: calculate_face_ssim
+      better: higher
+      crop_border: 0
+      test_y_channel: false
+      mask_threshold: 1
+    # 【NICOLE 2026】
+
+# logging settings
+logger:
+  print_freq: 200
+  save_checkpoint_freq: !!float 1e4
+  use_tb_logger: true
+  wandb:
+    # 【NICOLE 2026】Enable W&B monitoring for old-photo restoration runs.
+    entity: singularity1371301-the-hong-kong-polytechnic-university
+    project: MambaIR
+    resume_id: ~
+
+# dist training settings
+dist_params:
+  backend: nccl
+  port: 29500
+# 【NICOLE 2026】

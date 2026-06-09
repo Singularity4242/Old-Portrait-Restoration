@@ -1,0 +1,69 @@
+name: test_MambaIRv2_OldPhoto_Baseline_FT_70000
+model_type: MambaIRv2Model
+scale: 1
+num_gpu: 1
+manual_seed: 0
+
+datasets:
+  test_1:
+    name: FFHQ_OldPhoto_Test
+    type: PairedImageDataset
+    dataroot_gt: /root/autodl-tmp/MambaIR/datasets/FFHQ_pair/test/HQ
+    dataroot_lq: /root/autodl-tmp/MambaIR/datasets/FFHQ_pair/test/LQ
+    dataroot_face_weight: /root/autodl-tmp/MambaIR/datasets/FFHQ_pair/test/face_weight
+    filename_tmpl: '{}'
+    io_backend:
+      type: disk
+
+# network structures
+network_g:
+  type: MambaIRv2
+  upscale: 1
+  in_chans: 3
+  img_size: 128
+  img_range: 1.
+  embed_dim: 174
+  d_state: 16
+  depths: [6, 6, 6, 6, 6, 6]
+  num_heads: [6, 6, 6, 6, 6, 6]
+  window_size: 16
+  inner_rank: 64
+  num_tokens: 128
+  convffn_kernel_size: 5
+  mlp_ratio: 2.
+  upsampler: ''
+  resi_connection: '1conv'
+
+# path
+path:
+  pretrain_network_g: experiments/MambaIRv2_OldPhoto_Baseline_FT_Resume30000/models/net_g_70000.pth
+  strict_load_g: true
+
+# validation settings
+val:
+  save_img: true
+  suffix: ~
+  selfensemble_testing: false
+  patchwise_testing: false
+
+  metrics:
+    psnr:
+      type: calculate_psnr
+      crop_border: 0
+      test_y_channel: false
+    ssim:
+      type: calculate_ssim
+      crop_border: 0
+      test_y_channel: false
+    face_psnr:
+      type: calculate_face_psnr
+      better: higher
+      crop_border: 0
+      test_y_channel: false
+      mask_threshold: 1
+    face_ssim:
+      type: calculate_face_ssim
+      better: higher
+      crop_border: 0
+      test_y_channel: false
+      mask_threshold: 1
