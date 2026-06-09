@@ -2,15 +2,18 @@ from copy import deepcopy
 
 from basicsr.utils import get_root_logger
 from basicsr.utils.registry import LOSS_REGISTRY
-from .losses import (CharbonnierLoss, GANLoss, L1Loss, MSELoss, WeightedTVLoss, g_path_regularize,
-                     gradient_penalty_loss, r1_penalty)
-#from .face_losses import ROIWeightedL1Loss, IdentityLoss
+# 【NICOLE 2026】
+from .losses import (CharbonnierLoss, FaceRegionWeightedCharbonnierLoss, FaceRegionWeightedSobelCharbonnierLoss,
+                     GANLoss, L1Loss, MSELoss, WeightedTVLoss, g_path_regularize, gradient_penalty_loss, r1_penalty)
+# 【NICOLE 2026】
 
+# 【NICOLE 2026】
 __all__ = [
-    'L1Loss', 'MSELoss', 'CharbonnierLoss', 'WeightedTVLoss', 'GANLoss', 'gradient_penalty_loss',
-    'r1_penalty', 'g_path_regularize'
+    'L1Loss', 'MSELoss', 'CharbonnierLoss', 'FaceRegionWeightedCharbonnierLoss',
+    'FaceRegionWeightedSobelCharbonnierLoss', 'WeightedTVLoss', 'GANLoss', 'gradient_penalty_loss', 'r1_penalty',
+    'g_path_regularize'
 ]
-
+# 【NICOLE 2026】
 
 def build_loss(opt):
     """Build loss from options.

@@ -115,6 +115,137 @@ class CharbonnierLoss(nn.Module):
         """
         return self.loss_weight * charbonnier_loss(pred, target, weight, eps=self.eps, reduction=self.reduction)
 
+# NICOLE 2026
+@LOSS_REGISTRY.register()
+class FaceRegionWeightedCharbonnierLoss(nn.Module):
+    """Face-region weighted Charbonnier loss.
+
+    The face weight map is expected to be a single-channel tensor in [0, 1]
+    or [0, 255]. It is mapped to [weight_min, weight_max] before weighting.
+    """
+
+    def __init__(self, loss_weight=1.0, reduction='mean', eps=1e-12, weight_min=1.0, weight_max=2.0):
+        super(FaceRegionWeightedCharbonnierLoss, self).__init__()
+        if reduction != 'mean':
+            raise ValueError('FaceRegionWeightedCharbonnierLoss only supports reduction="mean".')
+        # 【NICOLE 2026】
+        if weight_min < 0 or weight_max <= 0 or weight_max < weight_min:
+            raise ValueError('weight_min should be non-negative, weight_max should be positive, '
+                             'and weight_max >= weight_min.')
+        # 【NICOLE 2026】
+
+        self.loss_weight = loss_weight
+        self.reduction = reduction
+        self.eps = eps
+        self.weight_min = weight_min
+        self.weight_max = weight_max
+
+    def forward(self, pred, target, face_weight, **kwargs):
+        """
+        Args:
+            pred (Tensor): Predicted image with shape (N, C, H, W).
+            target (Tensor): Ground truth image with shape (N, C, H, W).
+            face_weight (Tensor): Face weight map with shape (N, 1, H, W) or
+                (N, H, W), stored in [0, 1] or [0, 255].
+        """
+        if face_weight is None:
+            raise ValueError('face_weight is required for FaceRegionWeightedCharbonnierLoss.')
+        if face_weight.dim() == 3:
+            face_weight = face_weight.unsqueeze(1)
+        if face_weight.dim() != 4:
+            raise ValueError(f'face_weight should be 3D or 4D, but got shape {face_weight.shape}.')
+        if face_weight.shape[1] != 1:
+            raise ValueError(f'face_weight should have one channel, but got shape {face_weight.shape}.')
+        if face_weight.shape[0] != pred.shape[0] or face_weight.shape[-2:] != pred.shape[-2:]:
+            raise ValueError(
+                f'face_weight shape {face_weight.shape} is incompatible with pred shape {pred.shape}.')
+
+        face_weight = face_weight.to(dtype=pred.dtype, device=pred.device)
+        normalizer = torch.where(
+            face_weight.detach().max() > 1.0, face_weight.new_tensor(255.0), face_weight.new_tensor(1.0))
+        face_weight = face_weight / normalizer
+        face_weight = face_weight.clamp(0.0, 1.0)
+        face_weight = self.weight_min + (self.weight_max - self.weight_min) * face_weight
+
+        loss = torch.sqrt((pred - target)**2 + self.eps)
+        weighted_loss = loss * face_weight
+        denom = face_weight.expand_as(loss).sum().clamp_min(1e-12)
+        return self.loss_weight * weighted_loss.sum() / denom
+# NICOLE 2026
+
+# 【NICOLE 2026】
+@LOSS_REGISTRY.register()
+class FaceRegionWeightedSobelCharbonnierLoss(nn.Module):
+    """Face-region weighted RGB Sobel Charbonnier loss.
+
+    The face weight map is expected to be a single-channel tensor in [0, 1]
+    or [0, 255]. It is mapped to [weight_min, weight_max] before weighting.
+    """
+
+    def __init__(self, loss_weight=1.0, reduction='mean', eps=1e-12, weight_min=0.0, weight_max=1.0):
+        super(FaceRegionWeightedSobelCharbonnierLoss, self).__init__()
+        if reduction != 'mean':
+            raise ValueError('FaceRegionWeightedSobelCharbonnierLoss only supports reduction="mean".')
+        if weight_min < 0 or weight_max <= 0 or weight_max < weight_min:
+            raise ValueError('weight_min should be non-negative, weight_max should be positive, '
+                             'and weight_max >= weight_min.')
+
+        self.loss_weight = loss_weight
+        self.reduction = reduction
+        self.eps = eps
+        self.weight_min = weight_min
+        self.weight_max = weight_max
+
+        sobel_x = torch.tensor([[-1., 0., 1.], [-2., 0., 2.], [-1., 0., 1.]]).view(1, 1, 3, 3) / 4.0
+        sobel_y = torch.tensor([[-1., -2., -1.], [0., 0., 0.], [1., 2., 1.]]).view(1, 1, 3, 3) / 4.0
+        self.register_buffer('sobel_x', sobel_x)
+        self.register_buffer('sobel_y', sobel_y)
+
+    def _sobel_rgb(self, img):
+        channels = img.shape[1]
+        img = F.pad(img, (1, 1, 1, 1), mode='reflect')
+        sobel_x = self.sobel_x.to(dtype=img.dtype).repeat(channels, 1, 1, 1)
+        sobel_y = self.sobel_y.to(dtype=img.dtype).repeat(channels, 1, 1, 1)
+        grad_x = F.conv2d(img, sobel_x, groups=channels)
+        grad_y = F.conv2d(img, sobel_y, groups=channels)
+        return torch.cat([grad_x, grad_y], dim=1)
+
+    def forward(self, pred, target, face_weight, **kwargs):
+        """
+        Args:
+            pred (Tensor): Predicted image with shape (N, C, H, W).
+            target (Tensor): Ground truth image with shape (N, C, H, W).
+            face_weight (Tensor): Face weight map with shape (N, 1, H, W) or
+                (N, H, W), stored in [0, 1] or [0, 255].
+        """
+        if pred.shape != target.shape:
+            raise ValueError(f'pred shape {pred.shape} is incompatible with target shape {target.shape}.')
+        if face_weight is None:
+            raise ValueError('face_weight is required for FaceRegionWeightedSobelCharbonnierLoss.')
+        if face_weight.dim() == 3:
+            face_weight = face_weight.unsqueeze(1)
+        if face_weight.dim() != 4:
+            raise ValueError(f'face_weight should be 3D or 4D, but got shape {face_weight.shape}.')
+        if face_weight.shape[1] != 1:
+            raise ValueError(f'face_weight should have one channel, but got shape {face_weight.shape}.')
+        if face_weight.shape[0] != pred.shape[0] or face_weight.shape[-2:] != pred.shape[-2:]:
+            raise ValueError(
+                f'face_weight shape {face_weight.shape} is incompatible with pred shape {pred.shape}.')
+
+        face_weight = face_weight.to(dtype=pred.dtype, device=pred.device)
+        normalizer = torch.where(
+            face_weight.detach().max() > 1.0, face_weight.new_tensor(255.0), face_weight.new_tensor(1.0))
+        face_weight = face_weight / normalizer
+        face_weight = face_weight.clamp(0.0, 1.0)
+        face_weight = self.weight_min + (self.weight_max - self.weight_min) * face_weight
+
+        pred_edge = self._sobel_rgb(pred)
+        target_edge = self._sobel_rgb(target)
+        loss = torch.sqrt((pred_edge - target_edge)**2 + self.eps)
+        weighted_loss = loss * face_weight
+        denom = face_weight.expand_as(loss).sum().clamp_min(1e-12)
+        return self.loss_weight * weighted_loss.sum() / denom
+# 【NICOLE 2026】
 
 @LOSS_REGISTRY.register()
 class WeightedTVLoss(L1Loss):

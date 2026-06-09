@@ -779,6 +779,20 @@ class UpsampleOneStep(nn.Sequential):
         return flops
 
 
+# NICOLE 2026
+class HighFrequencyEnhancementBlock(nn.Module):
+    def __init__(self, channels, init_alpha=0.0, channel_wise=True):
+        super().__init__()
+        shape = (1, channels, 1, 1) if channel_wise else (1, 1, 1, 1)
+        self.alpha = nn.Parameter(torch.full(shape, init_alpha))
+        self.pool = nn.AdaptiveAvgPool2d(1)
+
+    def forward(self, x):
+        high = x - self.pool(x)
+        return x + self.alpha * high
+# NICOLE 2026
+
+
 @ARCH_REGISTRY.register()
 class MambaIRv2(nn.Module):
     def __init__(self,
@@ -917,6 +931,13 @@ class MambaIRv2(nn.Module):
             # for image denoising and JPEG compression artifact reduction
             self.conv_last = nn.Conv2d(embed_dim, num_out_ch, 3, 1, 1)
 
+        # NICOLE 2026
+        use_heb = kwargs.get('use_heb', False)
+        heb_init = kwargs.get('heb_init', 0.0)
+        heb_channel_wise = kwargs.get('heb_channel_wise', True)
+        self.heb = HighFrequencyEnhancementBlock(embed_dim, heb_init, heb_channel_wise) if use_heb else nn.Identity()
+        # NICOLE 2026
+
         self.apply(self._init_weights)
 
     def _init_weights(self, m):
@@ -1022,6 +1043,9 @@ class MambaIRv2(nn.Module):
             # for image denoising and JPEG compression artifact reduction
             x_first = self.conv_first(x)
             res = self.conv_after_body(self.forward_features(x_first, params)) + x_first
+            # NICOLE 2026
+            res = self.heb(res)
+            # NICOLE 2026
             x = x + self.conv_last(res)
 
         x = x / self.img_range + self.mean
@@ -1060,4 +1084,3 @@ if __name__ == '__main__':
     _input = torch.randn([2, 3, 64, 64]).cuda()
     output = model(_input).cuda()
     print(output.shape)
-

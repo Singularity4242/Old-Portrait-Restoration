@@ -62,9 +62,24 @@ class SRModel(BaseModel):
             self.cri_perceptual = build_loss(train_opt['perceptual_opt']).to(self.device)
         else:
             self.cri_perceptual = None
+# 【NICOLE 2026】
+        # if self.cri_pix is None and self.cri_perceptual is None:
+        #     raise ValueError('Both pixel and perceptual losses are None.')
+        if train_opt.get('face_region_opt'):
+            self.cri_face_region = build_loss(train_opt['face_region_opt']).to(self.device)
+        else:
+            self.cri_face_region = None
 
-        if self.cri_pix is None and self.cri_perceptual is None:
-            raise ValueError('Both pixel and perceptual losses are None.')
+        # 【NICOLE 2026】
+        if train_opt.get('edge_opt'):
+            self.cri_edge = build_loss(train_opt['edge_opt']).to(self.device)
+        else:
+            self.cri_edge = None
+        # 【NICOLE 2026】
+
+        if self.cri_pix is None and self.cri_perceptual is None and self.cri_face_region is None and self.cri_edge is None:
+            raise ValueError('Pixel, perceptual, face-region and edge losses are all None.')
+# 【NICOLE 2026】
 
         # set up optimizers and schedulers
         self.setup_optimizers()
@@ -88,6 +103,13 @@ class SRModel(BaseModel):
         self.lq = data['lq'].to(self.device)
         if 'gt' in data:
             self.gt = data['gt'].to(self.device)
+# 【NICOLE 2026】
+        if 'face_weight' in data:
+            self.face_weight = data['face_weight'].to(self.device)
+        elif hasattr(self, 'face_weight'):
+            del self.face_weight
+# 【NICOLE 2026】
+
 
     def optimize_parameters(self, current_iter):
         self.optimizer_g.zero_grad()
@@ -109,6 +131,28 @@ class SRModel(BaseModel):
             if l_style is not None:
                 l_total += l_style
                 loss_dict['l_style'] = l_style
+# 【NICOLE 2026】
+        # face-region weighted reconstruction loss
+        if self.cri_face_region:
+            if not hasattr(self, 'face_weight'):
+                raise ValueError(
+                    'face_region_opt is enabled, but the current batch does not contain face_weight. '
+                    'Please set dataroot_face_weight in the training dataset config.')
+            l_face = self.cri_face_region(self.output, self.gt, self.face_weight)
+            l_total += l_face
+            loss_dict['l_face'] = l_face
+        # 【NICOLE 2026】
+        # face-region weighted RGB Sobel edge loss
+        if self.cri_edge:
+            if not hasattr(self, 'face_weight'):
+                raise ValueError(
+                    'edge_opt is enabled, but the current batch does not contain face_weight. '
+                    'Please set dataroot_face_weight in the training dataset config.')
+            l_edge = self.cri_edge(self.output, self.gt, self.face_weight)
+            l_total += l_edge
+            loss_dict['l_edge'] = l_edge
+        # 【NICOLE 2026】
+# 【NICOLE 2026】
 
         l_total.backward()
         self.optimizer_g.step()
@@ -186,6 +230,13 @@ class SRModel(BaseModel):
         dataset_name = dataloader.dataset.opt['name']
         with_metrics = self.opt['val'].get('metrics') is not None
         use_pbar = self.opt['val'].get('pbar', False)
+        # 【NICOLE 2026】
+        face_metric_types = {'calculate_face_psnr', 'calculate_face_ssim'}
+        need_face_weight_metric = False
+        if with_metrics:
+            need_face_weight_metric = any(
+                metric_opt.get('type') in face_metric_types for metric_opt in self.opt['val']['metrics'].values())
+        # 【NICOLE 2026】
 
         if with_metrics:
             if not hasattr(self, 'metric_results'):  # only execute in the first run
@@ -212,6 +263,19 @@ class SRModel(BaseModel):
                 gt_img = tensor2img([visuals['gt']])
                 metric_data['img2'] = gt_img
                 del self.gt
+            # 【NICOLE 2026】
+            if 'face_weight' in val_data:
+                face_weight = val_data['face_weight'][0].detach().float().cpu().numpy()
+                if face_weight.ndim == 3 and face_weight.shape[0] == 1:
+                    face_weight = face_weight[0]
+                metric_data['face_weight'] = face_weight
+            elif need_face_weight_metric:
+                raise ValueError(
+                    'Face-region validation metrics are enabled, but the validation batch does not contain '
+                    'face_weight. Please set dataroot_face_weight in the validation dataset config.')
+            else:
+                metric_data.pop('face_weight', None)
+            # 【NICOLE 2026】
 
             # tentative for out of GPU memory
             del self.lq
