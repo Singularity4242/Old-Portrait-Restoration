@@ -3,6 +3,9 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+# 【NICOLE2026】梯度检查点显式导入（部分 torch 版本不随 import torch 自动加载该子模块）
+import torch.utils.checkpoint
+# 【NICOLE2026】
 from basicsr.archs.arch_util import to_2tuple, trunc_normal_
 from mamba_ssm.ops.selective_scan_interface import selective_scan_fn, selective_scan_ref
 from basicsr.utils.registry import ARCH_REGISTRY
@@ -544,6 +547,10 @@ class BasicBlock(nn.Module):
         self.input_resolution = input_resolution
         self.depth = depth
         self.idx = idx
+        # 【NICOLE2026】原代码 use_checkpoint 只接收不使用（全文件无 checkpoint 调用），
+        # 此处保存标志，在 forward 中真正启用梯度检查点以换取激活显存。
+        self.use_checkpoint = use_checkpoint
+        # 【NICOLE2026】
 
         self.layers = nn.ModuleList()
         for i in range(depth):
@@ -573,8 +580,17 @@ class BasicBlock(nn.Module):
 
     def forward(self, x, x_size, params):
         b, n, c = x.shape
+        # 【NICOLE2026】原实现（已注释）：
+        # for layer in self.layers:
+        #     x = layer(x, x_size, params)
+        # 梯度检查点：训练时不保存层内激活、反向时重算，约 30% 额外计算换大量显存。
+        # use_reentrant=False 支持 x_size(tuple)/params(dict) 这类非张量参数。
         for layer in self.layers:
-            x = layer(x, x_size, params)
+            if self.use_checkpoint and self.training:
+                x = torch.utils.checkpoint.checkpoint(layer, x, x_size, params, use_reentrant=False)
+            else:
+                x = layer(x, x_size, params)
+        # 【NICOLE2026】
         if self.downsample is not None:
             x = self.downsample(x)
         return x
@@ -780,16 +796,40 @@ class UpsampleOneStep(nn.Sequential):
 
 
 # NICOLE 2026
+# 【NICOLE2026】原 GAP 版本（已注释）：x - GAP(x) 只去除每个通道的空间均值（DC 分量），
+# 不是真正的空间高通；且其作用可被后续 conv_last 的线性变换完全复现（整体缩放 + 常数偏置），
+# 优化器没有动力更新 alpha，导致 alpha 始终停在初值 0（实验已证实），模块等效于恒等映射。
+# class HighFrequencyEnhancementBlock(nn.Module):
+#     def __init__(self, channels, init_alpha=0.0, channel_wise=True):
+#         super().__init__()
+#         shape = (1, channels, 1, 1) if channel_wise else (1, 1, 1, 1)
+#         self.alpha = nn.Parameter(torch.full(shape, init_alpha))
+#         self.pool = nn.AdaptiveAvgPool2d(1)
+#
+#     def forward(self, x):
+#         high = x - self.pool(x)
+#         return x + self.alpha * high
+# 【NICOLE2026】
+# 【NICOLE2026】修复版：5x5 局部均值模糊高通（unsharp masking）。
+# blur 的感受野（5x5）大于 conv_last 的 3x3，conv_last 无法单独复现
+# conv_last∘(I - blur) 这个复合算子 -> alpha 不再冗余，高频监督（Sobel/FFL）
+# 才有路径推动它。alpha 建议初值 0.1（yaml: heb_init），避开 0 处的梯度死点。
 class HighFrequencyEnhancementBlock(nn.Module):
-    def __init__(self, channels, init_alpha=0.0, channel_wise=True):
+    def __init__(self, channels, init_alpha=0.0, channel_wise=True, blur_kernel=5):
         super().__init__()
         shape = (1, channels, 1, 1) if channel_wise else (1, 1, 1, 1)
-        self.alpha = nn.Parameter(torch.full(shape, init_alpha))
-        self.pool = nn.AdaptiveAvgPool2d(1)
+        self.alpha = nn.Parameter(torch.full(shape, float(init_alpha)))
+        k = blur_kernel
+        self.pad = k // 2
+        self.groups = channels
+        # persistent=False:
+        self.register_buffer('blur', torch.ones(channels, 1, k, k) / float(k * k), persistent=False)
 
     def forward(self, x):
-        high = x - self.pool(x)
+        low = F.conv2d(F.pad(x, (self.pad,) * 4, mode='reflect'), self.blur.to(dtype=x.dtype), groups=self.groups)
+        high = x - low
         return x + self.alpha * high
+# 【NICOLE2026】
 # NICOLE 2026
 
 
@@ -935,7 +975,12 @@ class MambaIRv2(nn.Module):
         use_heb = kwargs.get('use_heb', False)
         heb_init = kwargs.get('heb_init', 0.0)
         heb_channel_wise = kwargs.get('heb_channel_wise', True)
-        self.heb = HighFrequencyEnhancementBlock(embed_dim, heb_init, heb_channel_wise) if use_heb else nn.Identity()
+        # 【NICOLE2026】原
+        # self.heb = HighFrequencyEnhancementBlock(embed_dim, heb_init, heb_channel_wise) if use_heb else nn.Identity()
+        heb_blur_kernel = kwargs.get('heb_blur_kernel', 5)
+        self.heb = HighFrequencyEnhancementBlock(
+            embed_dim, heb_init, heb_channel_wise, heb_blur_kernel) if use_heb else nn.Identity()
+        # 【NICOLE2026】
         # NICOLE 2026
 
         self.apply(self._init_weights)

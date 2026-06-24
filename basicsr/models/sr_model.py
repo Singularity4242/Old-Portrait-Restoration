@@ -77,8 +77,20 @@ class SRModel(BaseModel):
             self.cri_edge = None
         # 【NICOLE 2026】
 
-        if self.cri_pix is None and self.cri_perceptual is None and self.cri_face_region is None and self.cri_edge is None:
-            raise ValueError('Pixel, perceptual, face-region and edge losses are all None.')
+        # 【NICOLE2026】频域损失（全局 FocalFrequencyLoss 或 FaceRegionFocalFrequencyLoss，由 yaml type 决定）
+        if train_opt.get('freq_opt'):
+            self.cri_freq = build_loss(train_opt['freq_opt']).to(self.device)
+        else:
+            self.cri_freq = None
+        # 【NICOLE2026】
+
+        # 【NICOLE2026】原检查（已注释，新检查加入 cri_freq）
+        # if self.cri_pix is None and self.cri_perceptual is None and self.cri_face_region is None and self.cri_edge is None:
+        #     raise ValueError('Pixel, perceptual, face-region and edge losses are all None.')
+        if (self.cri_pix is None and self.cri_perceptual is None and self.cri_face_region is None
+                and self.cri_edge is None and self.cri_freq is None):
+            raise ValueError('Pixel, perceptual, face-region, edge and frequency losses are all None.')
+        # 【NICOLE2026】
 # 【NICOLE 2026】
 
         # set up optimizers and schedulers
@@ -112,7 +124,15 @@ class SRModel(BaseModel):
 
 
     def optimize_parameters(self, current_iter):
-        self.optimizer_g.zero_grad()
+        # 【NICOLE2026】梯度累积：train.accum_iter > 1 时每 accum_iter 步才执行一次
+        # optimizer.step()，等效 batch = batch_size_per_gpu * accum_iter，显存不增加。
+        # 注意：固定 total_iter 下，优化器更新次数变为 total_iter / accum_iter。
+        # 原实现（已注释）：
+        # self.optimizer_g.zero_grad()
+        accum_iter = max(int(self.opt['train'].get('accum_iter', 1)), 1)
+        if (current_iter - 1) % accum_iter == 0:  # 累积窗口的第一步清零梯度
+            self.optimizer_g.zero_grad()
+        # 【NICOLE2026】
         self.output = self.net_g(self.lq)
 
         l_total = 0
@@ -152,15 +172,33 @@ class SRModel(BaseModel):
             l_total += l_edge
             loss_dict['l_edge'] = l_edge
         # 【NICOLE 2026】
+        # 【NICOLE2026】频域损失：全局 FFL 忽略 face_weight，face-region FFL 需要 face_weight
+        if self.cri_freq:
+            l_freq = self.cri_freq(self.output, self.gt, face_weight=getattr(self, 'face_weight', None))
+            l_total += l_freq
+            loss_dict['l_freq'] = l_freq
+        # 【NICOLE2026】
 # 【NICOLE 2026】
-
-        l_total.backward()
-        self.optimizer_g.step()
+        loss_dict['l_total'] = l_total
+        # 【NICOLE2026】梯度累积：损失除以 accum_iter 使累积梯度等于等效 batch 的均值；
+        # 仅在累积窗口最后一步执行 optimizer.step() 与 EMA 更新。日志记录的是未缩放损失。
+        # 原实现（已注释）：
+        # l_total.backward()
+        # self.optimizer_g.step()
+        (l_total / accum_iter).backward()
+        do_step = (current_iter % accum_iter == 0)
+        if do_step:
+            self.optimizer_g.step()
+        # 【NICOLE2026】
 
         self.log_dict = self.reduce_loss_dict(loss_dict)
 
-        if self.ema_decay > 0:
+        # 【NICOLE2026】原实现（已注释）：EMA 只应在参数实际更新后执行
+        # if self.ema_decay > 0:
+        #     self.model_ema(decay=self.ema_decay)
+        if self.ema_decay > 0 and do_step:
             self.model_ema(decay=self.ema_decay)
+        # 【NICOLE2026】
 
     def test(self):
         if hasattr(self, 'net_g_ema'):

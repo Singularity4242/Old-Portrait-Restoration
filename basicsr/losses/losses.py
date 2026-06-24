@@ -176,10 +176,9 @@ class FaceRegionWeightedCharbonnierLoss(nn.Module):
 # 【NICOLE 2026】
 @LOSS_REGISTRY.register()
 class FaceRegionWeightedSobelCharbonnierLoss(nn.Module):
-    """Face-region weighted RGB Sobel Charbonnier loss.
-
-    The face weight map is expected to be a single-channel tensor in [0, 1]
-    or [0, 255]. It is mapped to [weight_min, weight_max] before weighting.
+    """人脸区域加权 RGB Sobel Charbonnier 损失函数。
+       人脸权重图应为 [0, 1] 或 [0, 255] 范围内的单通道张量。
+        在加权之前，它会被映射到 [weight_min, weight_max] 区域。
     """
 
     def __init__(self, loss_weight=1.0, reduction='mean', eps=1e-12, weight_min=0.0, weight_max=1.0):
@@ -246,6 +245,135 @@ class FaceRegionWeightedSobelCharbonnierLoss(nn.Module):
         denom = face_weight.expand_as(loss).sum().clamp_min(1e-12)
         return self.loss_weight * weighted_loss.sum() / denom
 # 【NICOLE 2026】
+
+
+# 【NICOLE2026】
+@LOSS_REGISTRY.register()
+class FocalFrequencyLoss(nn.Module):
+    """Focal Frequency Loss（全局版）。
+
+    参考：Jiang et al., "Focal Frequency Loss for Image Reconstruction and
+    Synthesis", ICCV 2021。对输出与 GT 做 2D FFT，按"难合成的频率（当前误差大）
+    权重更大"的原则自适应加权（权重 stop-gradient），用于对抗网络的
+    spectral bias、补回像素损失丢掉的高频分量。
+
+    Args:
+        loss_weight (float): 总损失权重。
+        alpha (float): focal 加权指数（论文中的 alpha），默认 1.0。
+        patch_factor (int): 将图像切成 patch_factor x patch_factor 个 patch
+            后分别计算频谱（原论文的 patch-based FFL），1 表示整图。
+    """
+
+    def __init__(self, loss_weight=1.0, alpha=1.0, patch_factor=1):
+        super(FocalFrequencyLoss, self).__init__()
+        if patch_factor < 1:
+            raise ValueError(f'patch_factor should be >= 1, but got {patch_factor}.')
+        self.loss_weight = loss_weight
+        self.alpha = alpha
+        self.patch_factor = patch_factor
+
+    def _patchify(self, img):
+        """(N, C, H, W) -> (N, C, P*P, H/P, W/P)，P = patch_factor。"""
+        n, c, h, w = img.shape
+        p = self.patch_factor
+        if h % p != 0 or w % p != 0:
+            raise ValueError(f'Image size ({h}x{w}) must be divisible by patch_factor ({p}).')
+        ph, pw = h // p, w // p
+        img = img.view(n, c, p, ph, p, pw).permute(0, 1, 2, 4, 3, 5)
+        return img.reshape(n, c, p * p, ph, pw)
+
+    def _focal_freq_dist(self, pred, target):
+        """逐元素的 focal 加权频谱距离，输出形状与输入相同。"""
+        pred_freq = torch.fft.fft2(pred.float(), norm='ortho')
+        target_freq = torch.fft.fft2(target.float(), norm='ortho')
+        diff = pred_freq - target_freq
+        freq_dist = diff.real ** 2 + diff.imag ** 2
+        # 难合成的频率权重更大；detach 防止权重项反向传播
+        weight = freq_dist.detach().sqrt() ** self.alpha
+        weight = weight / (weight.amax(dim=(-2, -1), keepdim=True) + 1e-12)
+        weight = weight.clamp(0.0, 1.0)
+        return weight * freq_dist
+
+    def forward(self, pred, target, **kwargs):
+        if pred.shape != target.shape:
+            raise ValueError(f'pred shape {pred.shape} is incompatible with target shape {target.shape}.')
+        out_dtype = pred.dtype
+        if self.patch_factor > 1:
+            pred = self._patchify(pred)
+            target = self._patchify(target)
+        loss = self._focal_freq_dist(pred, target)
+        return self.loss_weight * loss.mean().to(out_dtype)
+
+
+@LOSS_REGISTRY.register()
+class FaceRegionFocalFrequencyLoss(FocalFrequencyLoss):
+    """人脸区域加权的 patch-based Focal Frequency Loss（本文主要改造点）。
+
+    在原版 FFL 的 patch 机制上扩展：每个 patch 的频域损失按该 patch 内
+    人脸权重图（BiSeNet 解析掩码，0/76/255 三级）的均值加权——眼鼻嘴所在的
+    patch 得到更强的频域监督，背景 patch 仍保留 weight_min 的全局监督。
+    频谱在未掩码的 patch 内容上计算、人脸先验只在 patch 之间加权，
+    避免空域掩码直接乘进图像污染频谱（空域乘法 = 频域卷积）。
+
+    Args:
+        loss_weight (float): 总损失权重。
+        alpha (float): focal 加权指数。
+        patch_factor (int): patch 划分数，默认 4（128 crop -> 32x32 patch）。
+        weight_min (float): 背景 patch 的权重下限。
+        weight_max (float): 关键五官 patch 的权重上限。
+    """
+
+    def __init__(self, loss_weight=1.0, alpha=1.0, patch_factor=4, weight_min=0.3, weight_max=3.0):
+        super(FaceRegionFocalFrequencyLoss, self).__init__(
+            loss_weight=loss_weight, alpha=alpha, patch_factor=patch_factor)
+        if weight_min < 0 or weight_max <= 0 or weight_max < weight_min:
+            raise ValueError('weight_min should be non-negative, weight_max should be positive, '
+                             'and weight_max >= weight_min.')
+        self.weight_min = weight_min
+        self.weight_max = weight_max
+
+    def forward(self, pred, target, face_weight=None, **kwargs):
+        """
+        Args:
+            pred (Tensor): Predicted image with shape (N, C, H, W).
+            target (Tensor): Ground truth image with shape (N, C, H, W).
+            face_weight (Tensor): Face weight map with shape (N, 1, H, W) or
+                (N, H, W), stored in [0, 1] or [0, 255].
+        """
+        if pred.shape != target.shape:
+            raise ValueError(f'pred shape {pred.shape} is incompatible with target shape {target.shape}.')
+        if face_weight is None:
+            raise ValueError('face_weight is required for FaceRegionFocalFrequencyLoss. '
+                             'Please set dataroot_face_weight in the training dataset config.')
+        if face_weight.dim() == 3:
+            face_weight = face_weight.unsqueeze(1)
+        if face_weight.dim() != 4:
+            raise ValueError(f'face_weight should be 3D or 4D, but got shape {face_weight.shape}.')
+        if face_weight.shape[1] != 1:
+            raise ValueError(f'face_weight should have one channel, but got shape {face_weight.shape}.')
+        if face_weight.shape[0] != pred.shape[0] or face_weight.shape[-2:] != pred.shape[-2:]:
+            raise ValueError(
+                f'face_weight shape {face_weight.shape} is incompatible with pred shape {pred.shape}.')
+
+        out_dtype = pred.dtype
+        face_weight = face_weight.to(dtype=pred.dtype, device=pred.device)
+        normalizer = torch.where(
+            face_weight.detach().max() > 1.0, face_weight.new_tensor(255.0), face_weight.new_tensor(1.0))
+        face_weight = (face_weight / normalizer).clamp(0.0, 1.0)
+
+        pred_patches = self._patchify(pred)
+        target_patches = self._patchify(target)
+        loss = self._focal_freq_dist(pred_patches, target_patches)  # (N, C, P*P, h, w)
+
+        # 每个 patch 的人脸权重 = patch 内掩码均值 -> 映射到 [weight_min, weight_max]
+        patch_weight = self._patchify(face_weight).mean(dim=(-2, -1), keepdim=True)  # (N, 1, P*P, 1, 1)
+        patch_weight = self.weight_min + (self.weight_max - self.weight_min) * patch_weight
+        patch_weight = patch_weight.to(loss.dtype)
+
+        weighted_loss = loss * patch_weight
+        denom = patch_weight.expand_as(loss).sum().clamp_min(1e-12)
+        return self.loss_weight * (weighted_loss.sum() / denom).to(out_dtype)
+# 【NICOLE2026】
 
 @LOSS_REGISTRY.register()
 class WeightedTVLoss(L1Loss):
