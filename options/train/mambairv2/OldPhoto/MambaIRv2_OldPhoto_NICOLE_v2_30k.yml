@@ -1,0 +1,211 @@
+# 【NICOLE2026】v2 配置：修正损失方向 + face-region FFL + 修复版 HEB
+# 相对 Stage1 的变化：
+#   1. 删除 face_region_opt（人脸像素加权强化"回归到均值"的平滑压力，方向反了，见论文 Ch3 pilot study）
+#   2. edge_opt 激活：loss_weight 0.05 -> 0.3，weight_min 0 -> 0.3（背景保底），weight_max 1.0 -> 3.0（五官强化）
+#   3. 新增 freq_opt：FaceRegionFocalFrequencyLoss（patch-based FFL + 人脸 patch 加权，本文主要改造点）
+#   4. heb_init 0.0 -> 0.1（修复版 HEB 为 5x5 blur 高通，正初值避开梯度死点）
+name: MambaIRv2_OldPhoto_NICOLE_v2_30k
+model_type: MambaIRv2Model
+scale: 1
+num_gpu: 1
+manual_seed: 0
+
+# dataset and data loader settings
+datasets:
+  train:
+    name: OldPhoto_FaceFFL_Sobel_Train
+    type: PairedImageDataset
+    dataroot_gt: /root/autodl-tmp/MambaIR/datasets/FFHQ_pair/train/HQ
+    dataroot_lq: /root/autodl-tmp/MambaIR/datasets/FFHQ_pair/train/LQ
+    dataroot_face_weight: /root/autodl-tmp/MambaIR/datasets/FFHQ_pair/train/face_weight
+    filename_tmpl: '{}'
+    io_backend:
+      type: disk
+
+    gt_size: 128          # 注意：必须能被 freq_opt.patch_factor 整除（128 / 4 = 32）
+    use_hflip: true
+    use_rot: false
+
+    # data loader
+    use_shuffle: true
+    num_worker_per_gpu: 4
+    # batch_size_per_gpu: 1
+    batch_size_per_gpu: 4   # 【NICOLE2026】1 -> 4，配合 use_checkpoint: true；若 OOM 降到 2 并把 train.accum_iter 提到 2
+    dataset_enlarge_ratio: 1
+    prefetch_mode: ~
+
+  val:
+    # 【NICOLE2026】改用 200 张分层抽样子集（tools/oldphoto/make_val_subset.py 生成，开训前先跑该脚本）
+    name: FFHQ_OldPhoto_Val200
+    type: PairedImageDataset
+    # dataroot_gt: /root/autodl-tmp/MambaIR/datasets/FFHQ_pair/val/HQ
+    # dataroot_lq: /root/autodl-tmp/MambaIR/datasets/FFHQ_pair/val/LQ
+    # dataroot_face_weight: /root/autodl-tmp/MambaIR/datasets/FFHQ_pair/val/face_weight
+    dataroot_gt: /root/autodl-tmp/MambaIR/datasets/FFHQ_pair/val_200/HQ
+    dataroot_lq: /root/autodl-tmp/MambaIR/datasets/FFHQ_pair/val_200/LQ
+    dataroot_face_weight: /root/autodl-tmp/MambaIR/datasets/FFHQ_pair/val_200/face_weight
+    # 【NICOLE2026】
+    filename_tmpl: '{}'
+    io_backend:
+      type: disk
+
+# network structures
+network_g:
+  type: MambaIRv2
+  # HEB（修复版：5x5 blur 高通 + 正初值）
+  use_heb: true
+  heb_init: 0.1           # 【NICOLE2026】0.0 -> 0.1，避开 alpha=0 的梯度死点
+  heb_channel_wise: true
+  heb_blur_kernel: 5      # 【NICOLE2026】若出现块状伪影可尝试 7
+  # HEB
+  upscale: 1
+  in_chans: 3
+  img_size: 128
+  img_range: 1.
+  embed_dim: 174
+  d_state: 16
+  depths: [6, 6, 6, 6, 6, 6]
+  num_heads: [6, 6, 6, 6, 6, 6]
+  window_size: 16
+  inner_rank: 64
+  num_tokens: 128
+  convffn_kernel_size: 5
+  mlp_ratio: 2.
+  upsampler: ''
+  resi_connection: '1conv'
+  use_checkpoint: true    # 【NICOLE2026】梯度检查点：约 30% 额外计算换激活显存，支撑 batch 4
+
+# path
+path:
+  pretrain_network_g: /root/autodl-tmp/MambaIR/pretrained/mambairv2_ColorDN_15.pth
+  # 因为引入新参数
+  strict_load_g: false
+  resume_state: ~
+
+# training settings
+train:
+  # 【NICOLE2026】EMA：被验证/保存的模型为指数滑动平均权重，缓解小 batch 的指标抖动。
+  # 必须放在 train: 段（SRModel 从 train_opt 读取），放 datasets 下不生效。
+  ema_decay: 0.999
+  # 【NICOLE2026】梯度累积：等效 batch = batch_size_per_gpu * accum_iter，显存不增加。
+  # 默认 1（关闭）。batch 4 OOM 时可用 batch 2 + accum_iter 2；想进一步平滑可设 4（等效 16）。
+  # 注意：固定 total_iter 下，accum_iter > 1 会使优化器更新次数减少为 total_iter / accum_iter。
+  accum_iter: 1
+  optim_g:
+    type: Adam
+    lr: !!float 2e-4    # batch 1 -> 4 后维持 2e-4 合适（学习率随 batch 近似线性缩放的惯例）
+    weight_decay: 0
+    betas: [0.9, 0.99]
+
+  scheduler:
+    type: MultiStepLR
+    # 【NICOLE2026】原 milestones [150000, 240000, 270000, 285000] 来自 300k 训练，
+    # 全部在 30k 之外 = 学习率全程不衰减。按原比例（50%/80%/90%/95%）缩放到 30k；
+    # 最终 100k 长跑时换 [50000, 80000, 90000, 95000]。
+    milestones: [15000, 24000, 27000, 28500]
+    gamma: 0.5
+
+  total_iter: 30000
+  # 【NICOLE2026】-1 -> 1000：带新模块/新损失微调预训练权重，线性升温保护前期特征
+  warmup_iter: 1000
+
+  # losses
+  # 保真锚点：全图均匀像素损失（唯一的像素项）
+  pixel_opt:
+    type: CharbonnierLoss
+    loss_weight: 1.0
+    reduction: mean
+    eps: !!float 1e-3
+
+  # 【NICOLE2026】已删除 face_region_opt（保留注释作 pilot study 记录）：
+  # 人脸像素加权 = 在最需要锐化的区域加大"回归到均值"的平滑压力，与目标相反。
+  # face_region_opt:
+  #   type: FaceRegionWeightedCharbonnierLoss
+  #   loss_weight: 0.2
+  #   reduction: mean
+  #   eps: !!float 1e-3
+  #   weight_min: 0.0
+  #   weight_max: 1.0
+  # 【NICOLE2026】
+
+  # 锐化主力（空域）：人脸加权 Sobel 梯度损失
+  edge_opt:
+    type: FaceRegionWeightedSobelCharbonnierLoss
+    loss_weight: 0.3      # 【NICOLE2026】0.05 -> 0.3；跑通后看日志里 l_edge 与 l_pix 的实际量级再微调
+    reduction: mean
+    eps: !!float 1e-3
+    weight_min: 0.3       # 【NICOLE2026】0.0 -> 0.3，背景边缘保底约束，避免脸锐背景糊的割裂感
+    weight_max: 3.0       # 【NICOLE2026】1.0 -> 3.0，眼鼻嘴（掩码 255）边缘强化
+
+  # 【NICOLE2026】锐化主力（频域）：人脸区域 patch-based FFL
+  freq_opt:
+    type: FaceRegionFocalFrequencyLoss
+    loss_weight: 0.05     # 从小起步；FFL 对残余噪声敏感，若噪声/斑点回升立即调低
+    alpha: 1.0
+    patch_factor: 4       # 128 crop -> 4x4 网格，每 patch 32x32
+    weight_min: 0.3
+    weight_max: 3.0
+  # 消融对照（全局 FFL，验证人脸引导的增量价值时换用）：
+  # freq_opt:
+  #   type: FocalFrequencyLoss
+  #   loss_weight: 0.05
+  #   alpha: 1.0
+  #   patch_factor: 4
+  # 【NICOLE2026】
+
+# validation settings
+val:
+  # 【NICOLE2026】5e3 -> 2.5e3：验证集砍到 200 张后开销小，加密曲线点（12 个验证点）
+  val_freq: !!float 2.5e3
+  # 【NICOLE2026】true：训练中 dump 修复图，重点盯 HEB 是否放大 JPEG 块/噪声（皮肤、块边缘）
+  save_img: true
+
+  metrics:
+    psnr:
+      type: calculate_psnr
+      crop_border: 0
+      test_y_channel: false
+    ssim:
+      type: calculate_ssim
+      crop_border: 0
+      test_y_channel: false
+    face_psnr:
+      type: calculate_face_psnr
+      better: higher
+      crop_border: 0
+      test_y_channel: false
+      mask_threshold: 1
+    face_ssim:
+      type: calculate_face_ssim
+      better: higher
+      crop_border: 0
+      test_y_channel: false
+      mask_threshold: 1
+    # 【NICOLE2026】训练中跟踪感知质量（越低越好），曲线进 wandb
+    lpips:
+      type: calculate_lpips
+      better: lower
+      crop_border: 0
+      net: alex
+    # 【NICOLE2026】
+  # 提醒：加入高频监督后 PSNR/SSIM 可能下降（感知-失真权衡），
+  # 评估以 LPIPS + 五官 crop 目检为主；论文最终数字仍用测试集事后计算
+  # （tools/oldphoto/calculate_lpips.py，net=vgg 口径）。
+
+# logging settings
+logger:
+  print_freq: 200
+  # 【NICOLE2026】1e4 -> 5e3：BasicSR 不自动存 best 模型，加密 checkpoint 以便回取验证最优点；
+  # 也降低 autodl 实例被抢占时的损失（最多 5k iter）
+  save_checkpoint_freq: !!float 5e3
+  use_tb_logger: true
+  wandb:
+    entity: singularity1371301-the-hong-kong-polytechnic-university
+    project: MambaIR
+    resume_id: ~
+
+# dist training settings
+dist_params:
+  backend: nccl
+  port: 29500
+# 【NICOLE2026】

@@ -1,0 +1,163 @@
+# 【NICOLE2026】消融 A1：Charbonnier + 人脸加权 Sobel（验证 Sobel 边缘损失的独立贡献）
+# 消融链：A0(Charb) -> A1(+Sobel) -> A2(+FaceFFL) -> A3(+HEB, 即 v2 全家桶)
+# 与 A0 的唯一差异 = 新增 edge_opt（权重取 v2 同款 0.3/0.3/3.0，保证消融链一致）。
+# 跑通后先看日志 l_edge / l_pix 比值（两者均为加权后值），预期约 0.3 上下。
+name: MambaIRv2_OldPhoto_NICOLE_A1_charb_sobel_30k
+model_type: MambaIRv2Model
+scale: 1
+num_gpu: 1
+manual_seed: 0
+
+# dataset and data loader settings
+datasets:
+  train:
+    name: OldPhoto_A1_Charb_Sobel_Train
+    type: PairedImageDataset
+    dataroot_gt: /root/autodl-tmp/MambaIR/datasets/FFHQ_pair/train/HQ
+    dataroot_lq: /root/autodl-tmp/MambaIR/datasets/FFHQ_pair/train/LQ
+    dataroot_face_weight: /root/autodl-tmp/MambaIR/datasets/FFHQ_pair/train/face_weight
+    filename_tmpl: '{}'
+    io_backend:
+      type: disk
+
+    gt_size: 128
+    use_hflip: true
+    use_rot: false
+
+    # data loader
+    use_shuffle: true
+    num_worker_per_gpu: 4
+    batch_size_per_gpu: 4   # 配合 use_checkpoint: true；若 OOM 降到 2 并把 train.accum_iter 提到 2
+    dataset_enlarge_ratio: 1
+    prefetch_mode: ~
+
+  val:
+    # 【NICOLE2026】改用 200 张分层抽样子集（tools/oldphoto/make_val_subset.py 生成，开训前先跑该脚本）
+    name: FFHQ_OldPhoto_Val200
+    type: PairedImageDataset
+    # dataroot_gt: /root/autodl-tmp/MambaIR/datasets/FFHQ_pair/val/HQ
+    # dataroot_lq: /root/autodl-tmp/MambaIR/datasets/FFHQ_pair/val/LQ
+    # dataroot_face_weight: /root/autodl-tmp/MambaIR/datasets/FFHQ_pair/val/face_weight
+    dataroot_gt: /root/autodl-tmp/MambaIR/datasets/FFHQ_pair/val_200/HQ
+    dataroot_lq: /root/autodl-tmp/MambaIR/datasets/FFHQ_pair/val_200/LQ
+    dataroot_face_weight: /root/autodl-tmp/MambaIR/datasets/FFHQ_pair/val_200/face_weight
+    # 【NICOLE2026】
+    filename_tmpl: '{}'
+    io_backend:
+      type: disk
+
+# network structures
+network_g:
+  type: MambaIRv2
+  # 消融 A0/A1/A2 统一关闭 HEB，HEB 的效果由 A3 单独对照
+  use_heb: false
+  upscale: 1
+  in_chans: 3
+  img_size: 128
+  img_range: 1.
+  embed_dim: 174
+  d_state: 16
+  depths: [6, 6, 6, 6, 6, 6]
+  num_heads: [6, 6, 6, 6, 6, 6]
+  window_size: 16
+  inner_rank: 64
+  num_tokens: 128
+  convffn_kernel_size: 5
+  mlp_ratio: 2.
+  upsampler: ''
+  resi_connection: '1conv'
+  use_checkpoint: true    # 梯度检查点：约 30% 额外计算换激活显存，支撑 batch 4
+
+# path
+path:
+  pretrain_network_g: /root/autodl-tmp/MambaIR/pretrained/mambairv2_ColorDN_15.pth
+  strict_load_g: true
+  resume_state: ~
+
+# training settings
+train:
+  ema_decay: 0.999
+  accum_iter: 1
+  optim_g:
+    type: Adam
+    lr: !!float 2e-4
+    weight_decay: 0
+    betas: [0.9, 0.99]
+
+  scheduler:
+    type: MultiStepLR
+    milestones: [15000, 24000, 27000, 28500]   # 原 300k 调度按 50%/80%/90%/95% 缩放到 30k
+    gamma: 0.5
+
+  total_iter: 30000
+  warmup_iter: 1000
+
+  # losses
+  # 保真锚点：全图均匀像素损失
+  pixel_opt:
+    type: CharbonnierLoss
+    loss_weight: 1.0
+    reduction: mean
+    eps: !!float 1e-3
+
+  # A1 新增：人脸加权 Sobel 梯度损失（与 v2 同款权重）
+  edge_opt:
+    type: FaceRegionWeightedSobelCharbonnierLoss
+    loss_weight: 0.3
+    reduction: mean
+    eps: !!float 1e-3
+    weight_min: 0.3       # 背景边缘保底约束
+    weight_max: 3.0       # 眼鼻嘴（掩码 255）边缘强化
+
+# validation settings
+val:
+  # 【NICOLE2026】5e3 -> 2.5e3：验证集砍到 200 张后开销小，加密曲线点
+  val_freq: !!float 2.5e3
+  # 【NICOLE2026】false -> true：训练中每次验证 dump 修复图（EMA 输出）到
+  # experiments/<name>/visualization/<stem>/<stem>_<iter>.png，供 mid-training 目检是否过锐；
+  # 200 张 × 12 次 ≈ 360MB，可接受；定型后想省盘可改回 false。
+  save_img: true
+
+  metrics:
+    psnr:
+      type: calculate_psnr
+      crop_border: 0
+      test_y_channel: false
+    ssim:
+      type: calculate_ssim
+      crop_border: 0
+      test_y_channel: false
+    face_psnr:
+      type: calculate_face_psnr
+      better: higher
+      crop_border: 0
+      test_y_channel: false
+      mask_threshold: 1
+    face_ssim:
+      type: calculate_face_ssim
+      better: higher
+      crop_border: 0
+      test_y_channel: false
+      mask_threshold: 1
+    lpips:
+      type: calculate_lpips
+      better: lower
+      crop_border: 0
+      net: alex
+
+# logging settings
+logger:
+  print_freq: 200
+  # 【NICOLE2026】1e4 -> 5e3：BasicSR 不自动存 best 模型，加密 checkpoint 便于回取验证最优点
+  save_checkpoint_freq: !!float 5e3
+  use_tb_logger: true
+  wandb:
+    entity: singularity1371301-the-hong-kong-polytechnic-university
+    project: MambaIR
+    resume_id: ~
+
+# dist training settings
+dist_params:
+  backend: nccl
+  port: 29500
+# 【NICOLE2026】

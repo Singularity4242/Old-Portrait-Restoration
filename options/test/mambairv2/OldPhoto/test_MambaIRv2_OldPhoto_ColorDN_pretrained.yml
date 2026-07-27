@@ -1,5 +1,7 @@
-# NICOLE 2026 - Ours final test with global and face-region metrics
-name: test_MambaIRv2_OldPhoto_Ours
+# 【NICOLE2026】ColorDN 零样本基线：原始去噪预训练模型不微调，直接测我们的 2000 张老照片测试集
+# 这是"现成模型直接用"的真实起点：LQ -> ColorDN(zero-shot) -> A0(微调) -> A1 -> A2 -> v2
+# 它说明为什么需要场景微调（预期在老照片上表现差，远不如各微调臂）。
+name: test_MambaIRv2_OldPhoto_ColorDN_pretrained
 model_type: MambaIRv2Model
 scale: 1
 num_gpu: 1
@@ -16,14 +18,10 @@ datasets:
     io_backend:
       type: disk
 
-# network structures
+# network structures —— 必须是 ColorDN 原始结构（use_heb: false，与 A0/A1/A2 同结构）
 network_g:
   type: MambaIRv2
-  # HEB
-  use_heb: true
-  heb_init: 0.0
-  heb_channel_wise: true
-  # HEB
+  use_heb: false
   upscale: 1
   in_chans: 3
   img_size: 128
@@ -40,14 +38,13 @@ network_g:
   upsampler: ''
   resi_connection: '1conv'
 
-# path
 path:
-  pretrain_network_g: /root/autodl-tmp/MambaIR/experiments/MambaIRv2_OldPhoto_NICOLE_Stage2_70k/models/net_g_70000.pth
+  pretrain_network_g: /root/autodl-tmp/MambaIR/pretrained/mambairv2_ColorDN_15.pth
   strict_load_g: true
+  param_key_g: params       # 原始 ColorDN 权重存在 'params'（非 params_ema；微调臂才用 params_ema）
 
-# validation settings
 val:
-  save_img: true
+  save_img: false           # 只算指标；要定性图改 true
   suffix: ~
   selfensemble_testing: false
   patchwise_testing: false
@@ -73,14 +70,9 @@ val:
       crop_border: 0
       test_y_channel: false
       mask_threshold: 1
-    # 【NICOLE2026】感知指标
     lpips:
       type: calculate_lpips
       better: lower
       crop_border: 0
       net: vgg
-    # 【NICOLE2026】身份保真指标（ArcFace 余弦相似度，越高越不漂移）
-    identity:
-      type: calculate_identity
-      better: higher
-      crop_border: 0
+# 【NICOLE2026】

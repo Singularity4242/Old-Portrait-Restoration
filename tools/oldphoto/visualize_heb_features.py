@@ -16,12 +16,12 @@
 示例：
     python tools/oldphoto/visualize_heb_features.py \
         --config options/train/mambairv2/OldPhoto/MambaIRv2_OldPhoto_NICOLE_v2_30k.yml \
-        --ckpt experiments/MambaIRv2_OldPhoto_NICOLE_v2_30k/models/net_g_30000.pth \
+        --ckpt experiments/MambaIRv2_OldPhoto_NICOLE_v2_30k/models/net_g_latest.pth \
         --param_key params_ema \
         --lq_dir datasets/FFHQ_pair/val_200/LQ \
         --gt_dir datasets/FFHQ_pair/val_200/HQ \
         --face_weight_dir datasets/FFHQ_pair/val_200/face_weight \
-        --out_dir viz_heb --max_n 8
+        --out_dir visualization/viz_heb --max_n 8
 
 注意：--config 必须是 use_heb:true 的配置（A0/A1/A2 无 HEB，hook 不到）。
 """
@@ -96,11 +96,13 @@ def rapsd(gray):
 
 
 # ----------------------------- 模型构建 / 加载 ----------------------------- #
-def build_and_load(config_path, ckpt_path, param_key, device):
+def build_and_load(config_path, ckpt_path, param_key, device, require_heb=True):
+    """构建并加载 net_g。require_heb=True 时强制 use_heb（HEB 可视化用）；
+    特征 stage 走查/臂间对比可传 False 以加载 A0/A2 等无 HEB 的臂。"""
     with open(config_path, 'r') as f:
         opt = yaml.safe_load(f)
     net_opt = opt['network_g']
-    if not net_opt.get('use_heb', False):
+    if require_heb and not net_opt.get('use_heb', False):
         raise ValueError('--config 的 network_g.use_heb 必须为 true，否则没有 HEB 可 hook。')
     net = build_network(net_opt)
     sd = torch.load(ckpt_path, map_location='cpu')
@@ -112,10 +114,11 @@ def build_and_load(config_path, ckpt_path, param_key, device):
     if unexpected:
         print(f'[warn] unexpected keys: {unexpected[:5]}{" ..." if len(unexpected) > 5 else ""}')
     net.eval().to(device)
-    if isinstance(net.heb, torch.nn.Identity):
-        raise ValueError('net.heb 是 Identity（该权重对应 use_heb:false），无法可视化。')
-    a = net.heb.alpha.detach().abs().mean().item()
-    print(f'[info] HEB alpha |mean|={a:.4f}（应明显 >0，否则 HEB 近似 no-op）')
+    if require_heb:
+        if isinstance(net.heb, torch.nn.Identity):
+            raise ValueError('net.heb 是 Identity（该权重对应 use_heb:false），无法可视化。')
+        a = net.heb.alpha.detach().abs().mean().item()
+        print(f'[info] HEB alpha |mean|={a:.4f}（应明显 >0，否则 HEB 近似 no-op）')
     return net
 
 
@@ -169,6 +172,7 @@ def main():
 
     rapsd_acc = []   # (freq, before_power, after_power) 用于平均曲线
     focus_rows = []  # face_focus csv
+    rel_acc = []     # 每图的相对注入强度 E_inc/E_before
 
     try:
         for name in names:
@@ -182,23 +186,40 @@ def main():
             out_bgr = tensor_to_bgr(out_t)
             H, W = lq_bgr.shape[:2]
 
-            # 特征裁回原图尺寸（forward 内部按 window_size 做过 padding）
-            f_before = cap['before'][:, :, :H, :W]
-            f_after = cap['after'][:, :, :H, :W]
+            # 立刻取走真 alpha 那次前向的特征（裁回原图尺寸）：
+            # 下面的 alpha=0 前向会再次触发 hook 覆盖 cap，必须先存。
+            f_before = cap['before'][:, :, :H, :W].clone()
+            f_after = cap['after'][:, :, :H, :W].clone()
+
+            # HEB 开/关输出差：临时把 alpha 置零再前向一次（不用重训），
+            # |out_on - out_off| 即 HEB 对成品图的净贡献，比看 latent 直观。
+            orig_alpha = net.heb.alpha.data.clone()
+            net.heb.alpha.data.zero_()
+            with torch.no_grad():
+                out_off_t = net(lq_t)
+            net.heb.alpha.data.copy_(orig_alpha)
+            out_off_bgr = tensor_to_bgr(out_off_t)
+            out_diff = (out_t - out_off_t)[0].abs().mean(0).cpu().numpy()[:H, :W]
+
             E_before = feature_energy(f_before)
             E_after = feature_energy(f_after)
             E_inc = feature_energy(f_after - f_before)  # == alpha*high 的能量
+            # 相对注入强度：HEB 增量能量 / 进 HEB 信号能量（诊断 HEB 贡献大小）
+            rel = float(E_inc.mean() / (E_before.mean() + 1e-8))
+            rel_acc.append(rel)
 
             # --- 空间面板 ---
             common = max(E_before.max(), E_after.max()) if args.shared_scale else None
             vb, _ = norm01(E_before, scale=common)
             va, _ = norm01(E_after, scale=common)
             vi, _ = norm01(E_inc)
+            vdiff, _ = norm01(out_diff)
             cols = [
                 (lq_bgr, 'LQ'),
                 (overlay_heatmap(lq_bgr, vb), 'before-HEB'),
-                (overlay_heatmap(lq_bgr, vi), 'HEB-inject'),
+                (overlay_heatmap(lq_bgr, vi), f'HEB-inject(rel{rel:.2f})'),
                 (overlay_heatmap(lq_bgr, va), 'after-HEB'),
+                (overlay_heatmap(out_bgr, vdiff), 'dOut(HEB on-off)'),
                 (out_bgr, 'output'),
             ]
             if args.gt_dir:
@@ -262,6 +283,11 @@ def main():
         org_ratios = np.array([r[5] for r in focus_rows])
         print(f'\n[face-focus] 人脸内/外注入能量比 均值={ratios.mean():.3f}（>1 即偏向人脸），'
               f'五官/背景={org_ratios.mean():.3f} -> {csv_path}')
+
+    if rel_acc:
+        print(f'\n[heb-strength] 相对注入强度 E_inc/E_before 均值={np.mean(rel_acc):.3f} '
+              f'(min={min(rel_acc):.3f}, max={max(rel_acc):.3f})。'
+              f'此值很小说明 HEB 对特征改动有限 -> 看 dOut 列与 rapsd_mean 判断是否值得保留。')
 
     print(f'\n完成，结果在 {out_dir}/。')
 

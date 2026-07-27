@@ -11,6 +11,9 @@ class MambaIRv2Model(SRModel):
 
     # test by partitioning
     def test(self):
+        if not self.opt.get('val', {}).get('patchwise_testing', False):
+            return super().test()
+
         _, C, h, w = self.lq.size()
         split_token_h = h // 200 + 1  # number of horizontal cut sections
         split_token_w = w // 200 + 1  # number of vertical cut sections
@@ -62,7 +65,7 @@ class MambaIRv2Model(SRModel):
                 for chop in img_chops:
                     out = self.net_g_ema(chop)  # image processing of each partition
                     outputs.append(out)
-                _img = torch.zeros(1, C, H * scale, W * scale)
+                _img = torch.zeros(1, C, H * scale, W * scale, device=img.device, dtype=img.dtype)
                 # merge
                 for i in range(ral):
                     for j in range(row):
@@ -85,7 +88,7 @@ class MambaIRv2Model(SRModel):
                 for chop in img_chops:
                     out = self.net_g(chop)  # image processing of each partition
                     outputs.append(out)
-                _img = torch.zeros(1, C, H * scale, W * scale)
+                _img = torch.zeros(1, C, H * scale, W * scale, device=img.device, dtype=img.dtype)
                 # merge
                 for i in range(ral):
                     for j in range(row):

@@ -1,5 +1,5 @@
-# NICOLE 2026 - Ours final test with global and face-region metrics
-name: test_MambaIRv2_OldPhoto_Ours
+# 【NICOLE2026】A1 测试：Charbonnier + 人脸加权 Sobel，完整 2000 张测试集
+name: test_MambaIRv2_OldPhoto_A1
 model_type: MambaIRv2Model
 scale: 1
 num_gpu: 1
@@ -16,14 +16,10 @@ datasets:
     io_backend:
       type: disk
 
-# network structures
+# network structures —— A0/A1/A2 统一 use_heb: false
 network_g:
   type: MambaIRv2
-  # HEB
-  use_heb: true
-  heb_init: 0.0
-  heb_channel_wise: true
-  # HEB
+  use_heb: false
   upscale: 1
   in_chans: 3
   img_size: 128
@@ -40,12 +36,11 @@ network_g:
   upsampler: ''
   resi_connection: '1conv'
 
-# path
 path:
-  pretrain_network_g: /root/autodl-tmp/MambaIR/experiments/MambaIRv2_OldPhoto_NICOLE_Stage2_70k/models/net_g_70000.pth
+  pretrain_network_g: /root/autodl-tmp/MambaIR/experiments/MambaIRv2_OldPhoto_NICOLE_A1_charb_sobel_30k/models/net_g_latest.pth
   strict_load_g: true
+  param_key_g: params_ema
 
-# validation settings
 val:
   save_img: true
   suffix: ~
@@ -73,7 +68,6 @@ val:
       crop_border: 0
       test_y_channel: false
       mask_threshold: 1
-    # 【NICOLE2026】感知指标
     lpips:
       type: calculate_lpips
       better: lower
@@ -84,3 +78,4 @@ val:
       type: calculate_identity
       better: higher
       crop_border: 0
+# 【NICOLE2026】

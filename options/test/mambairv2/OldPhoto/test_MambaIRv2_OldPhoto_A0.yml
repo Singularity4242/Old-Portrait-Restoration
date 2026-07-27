@@ -1,5 +1,7 @@
-# NICOLE 2026 - Ours final test with global and face-region metrics
-name: test_MambaIRv2_OldPhoto_Ours
+# 【NICOLE2026】A0 测试：纯 Charbonnier 基线，完整 2000 张测试集
+# 跑：python basicsr/test.py -opt options/test/mambairv2/OldPhoto/test_MambaIRv2_OldPhoto_A0.yml
+# 结果指标打印在日志，并写到 results/<name>/
+name: test_MambaIRv2_OldPhoto_A0
 model_type: MambaIRv2Model
 scale: 1
 num_gpu: 1
@@ -16,14 +18,10 @@ datasets:
     io_backend:
       type: disk
 
-# network structures
+# network structures —— A0/A1/A2 统一 use_heb: false
 network_g:
   type: MambaIRv2
-  # HEB
-  use_heb: true
-  heb_init: 0.0
-  heb_channel_wise: true
-  # HEB
+  use_heb: false
   upscale: 1
   in_chans: 3
   img_size: 128
@@ -40,14 +38,13 @@ network_g:
   upsampler: ''
   resi_connection: '1conv'
 
-# path
 path:
-  pretrain_network_g: /root/autodl-tmp/MambaIR/experiments/MambaIRv2_OldPhoto_NICOLE_Stage2_70k/models/net_g_70000.pth
+  pretrain_network_g: /root/autodl-tmp/MambaIR/experiments/MambaIRv2_OldPhoto_NICOLE_A0_charb_30k/models/net_g_30000.pth
   strict_load_g: true
+  param_key_g: params_ema   # 评估 EMA 权重，与各臂统一口径
 
-# validation settings
 val:
-  save_img: true
+  save_img: true           # 只算指标；要定性图改 true（2000 张约占 0.6-1GB）
   suffix: ~
   selfensemble_testing: false
   patchwise_testing: false
@@ -73,14 +70,14 @@ val:
       crop_border: 0
       test_y_channel: false
       mask_threshold: 1
-    # 【NICOLE2026】感知指标
     lpips:
       type: calculate_lpips
       better: lower
       crop_border: 0
-      net: vgg
+      net: vgg              # 论文最终口径用 vgg；首次跑前先缓存：python -c "import lpips; lpips.LPIPS(net='vgg')"
     # 【NICOLE2026】身份保真指标（ArcFace 余弦相似度，越高越不漂移）
     identity:
       type: calculate_identity
       better: higher
       crop_border: 0
+# 【NICOLE2026】
